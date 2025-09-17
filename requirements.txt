@@ -1,6 +1,6 @@
-fastapi 
-uvicorn 
-slack_sdk 
-requests 
-openai 
+fastapi
+uvicorn
+slack_sdk
+requests
 python-dotenv
+google.generativeai
