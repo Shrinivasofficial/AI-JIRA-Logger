@@ -4,3 +4,7 @@ slack_sdk
 requests
 python-dotenv
 google.generativeai
+beautifulsoup4
+fuzzywuzzy
+python-Levenshtein
+
