@@ -9,11 +9,15 @@ from ai_jira_logger.jira_helpers import (
 )
 from ai_jira_logger.confluence_helpers import confluence_answer, refresh_cache
 from ai_jira_logger.ai_helpers import enhance_description
+import asyncio
 
 router = APIRouter()
 
 # ✅ Warm up Confluence cache at startup
 refresh_cache()
+
+# Track processed Slack event IDs to avoid duplication
+PROCESSED_EVENTS = set()
 
 
 @router.post("/slack/events")
@@ -25,11 +29,16 @@ async def slack_events(req: Request):
         return {"challenge": body["challenge"]}
 
     event = body.get("event", {})
+    event_id = body.get("event_id") or event.get("client_msg_id")
+    if not event_id or event_id in PROCESSED_EVENTS:
+        return {"ok": True}  # Skip duplicate event
+    PROCESSED_EVENTS.add(event_id)
+
     if event.get("type") == "message" and "bot_id" not in event:
         user_text = event.get("text", "").strip()
         channel, user_id = event.get("channel"), event.get("user")
 
-        # Jira-related commands (require Slack email)
+        # Jira-related commands
         if user_text.lower().startswith(("tickets", "desc ", "descai ", "comment ", "subtasks ", "details ")):
             slack_email = get_slack_user_email(user_id)
             if not slack_email:
@@ -92,8 +101,14 @@ async def slack_events(req: Request):
                     slack_client.chat_postMessage(channel=channel, text=f"Could not fetch details for {issue_key}")
 
         else:
-            # Non-Jira → Confluence Q&A
+            # Non-Jira → Confluence Q&A with typing indicator
             try:
+                # Send "typing..." indicator
+                slack_client.chat_postMessage(channel=channel, text="_Bot is typing..._")
+                
+                # Async sleep to simulate typing
+                await asyncio.sleep(1)
+                
                 answer = confluence_answer(user_text)
                 slack_client.chat_postMessage(channel=channel, text=answer)
             except Exception as e:

@@ -12,6 +12,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CONFLUENCE_DOMAIN = os.getenv("JIRA_DOMAIN") 
 CONFLUENCE_EMAIL = os.getenv("JIRA_EMAIL")   
 CONFLUENCE_API_TOKEN = os.getenv("JIRA_API_TOKEN")  
+SPACE_KEY = os.getenv("SPACE_KEY")
 
 def validate_config():
     if not all([SLACK_BOT_TOKEN, JIRA_API_TOKEN, JIRA_EMAIL, JIRA_DOMAIN, GEMINI_API_KEY]):
