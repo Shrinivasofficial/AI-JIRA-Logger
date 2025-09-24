@@ -8,4 +8,4 @@ beautifulsoup4
 fuzzywuzzy
 python-Levenshtein
 docx
-atlassian
+atlassian-python-api
