@@ -6,6 +6,8 @@ from ai_jira_logger.jira_helpers import (
     add_comment,
     fetch_subtasks,
     fetch_issue_details,
+    parse_slack_worklog,
+    log_to_jira_worklog
 )
 from ai_jira_logger.confluence_helpers import confluence_answer, refresh_cache
 from ai_jira_logger.ai_helpers import enhance_description
@@ -13,7 +15,7 @@ import asyncio
 
 router = APIRouter()
 
-# ✅ Warm up Confluence cache at startup
+# Warm up Confluence cache at startup
 refresh_cache()
 
 # Track processed Slack event IDs to avoid duplication
@@ -34,47 +36,78 @@ async def slack_events(req: Request):
         return {"ok": True}  # Skip duplicate event
     PROCESSED_EVENTS.add(event_id)
 
-    if event.get("type") == "message" and "bot_id" not in event:
-        user_text = event.get("text", "").strip()
-        channel, user_id = event.get("channel"), event.get("user")
+    if event.get("type") != "message" or "bot_id" in event:
+        return {"ok": True}  # Skip non-user messages
 
-        # Jira-related commands
-        if user_text.lower().startswith(("tickets", "desc ", "descai ", "comment ", "subtasks ", "details ")):
-            slack_email = get_slack_user_email(user_id)
-            if not slack_email:
-                slack_client.chat_postMessage(channel=channel, text="⚠️ Could not fetch your Slack email.")
-                return {"ok": True}
-            jira_email = slack_email
+    user_text = event.get("text", "").strip()
+    channel, user_id = event.get("channel"), event.get("user")
 
+    # -------------------------------
+    # Work log command
+    # Format: worklog ISSUE_KEY - comment - TIME_SPENT
+    # -------------------------------
+    if user_text.lower().startswith("worklog "):
+        try:
+            _, rest = user_text.split(" ", 1)
+            issue_key, message, time_spent = parse_slack_worklog(rest)
+            status, resp_text = log_to_jira_worklog(issue_key, message, time_spent)
+            if status in (200, 201, 204):
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text=f"✅ Logged {time_spent} to {issue_key} with comment: {message}"
+                )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text=f"❌ Failed to log work: {resp_text}"
+                )
+        except Exception as e:
+            slack_client.chat_postMessage(
+                channel=channel,
+                text=f"❌ Error parsing or logging work: {e}"
+            )
+        return {"ok": True}
+
+    # -------------------------------
+    # Jira commands
+    # -------------------------------
+    if user_text.lower().startswith(("tickets", "desc ", "descai ", "comment ", "subtasks ", "details ")):
+        slack_email = get_slack_user_email(user_id)
+        if not slack_email:
+            slack_client.chat_postMessage(channel=channel, text="⚠️ Could not fetch your Slack email.")
+            return {"ok": True}
+        jira_email = slack_email
+
+        try:
             if user_text.lower() == "tickets":
                 tickets = fetch_user_tickets(jira_email)
                 msg = "\n".join([f"{i+1}. {t[0]}: {t[1]}" for i, t in enumerate(tickets)]) if tickets else "No tickets assigned to you."
                 slack_client.chat_postMessage(channel=channel, text=msg)
 
             elif user_text.lower().startswith("desc "):
-                try:
-                    _, issue_key, new_text = user_text.split(" ", 2)
-                    status, _ = update_issue_description(issue_key, new_text)
-                    slack_client.chat_postMessage(channel=channel, text=f"Updated {issue_key} (status: {status})")
-                except Exception as e:
-                    slack_client.chat_postMessage(channel=channel, text=f"Error updating description: {e}")
+                _, issue_key, new_text = user_text.split(" ", 2)
+                status, resp_text = update_issue_description(issue_key, new_text)
+                if status in (200, 201, 204):
+                    slack_client.chat_postMessage(channel=channel, text=f"✅ Updated {issue_key}")
+                else:
+                    slack_client.chat_postMessage(channel=channel, text=f"❌ Failed to update {issue_key}: {resp_text}")
 
             elif user_text.lower().startswith("descai "):
-                try:
-                    _, issue_key, raw_text = user_text.split(" ", 2)
-                    enhanced = enhance_description(raw_text)
-                    status, _ = update_issue_description(issue_key, enhanced)
-                    slack_client.chat_postMessage(channel=channel, text=f"AI-enhanced {issue_key} (status: {status})\n{enhanced}")
-                except Exception as e:
-                    slack_client.chat_postMessage(channel=channel, text=f"Error enhancing description: {e}")
+                _, issue_key, raw_text = user_text.split(" ", 2)
+                enhanced = enhance_description(raw_text)
+                status, resp_text = update_issue_description(issue_key, enhanced)
+                if status in (200, 201, 204):
+                    slack_client.chat_postMessage(channel=channel, text=f"✅ AI-enhanced {issue_key}\n{enhanced}")
+                else:
+                    slack_client.chat_postMessage(channel=channel, text=f"❌ Failed to enhance {issue_key}: {resp_text}")
 
             elif user_text.lower().startswith("comment "):
-                try:
-                    _, issue_key, comment_text = user_text.split(" ", 2)
-                    status, _ = add_comment(issue_key, comment_text)
-                    slack_client.chat_postMessage(channel=channel, text=f"Comment added to {issue_key} (status: {status})")
-                except Exception as e:
-                    slack_client.chat_postMessage(channel=channel, text=f"Error adding comment: {e}")
+                _, issue_key, comment_text = user_text.split(" ", 2)
+                status, resp_text = add_comment(issue_key, comment_text)
+                if status in (200, 201, 204):
+                    slack_client.chat_postMessage(channel=channel, text=f"✅ Comment added to {issue_key}")
+                else:
+                    slack_client.chat_postMessage(channel=channel, text=f"❌ Failed to add comment to {issue_key}: {resp_text}")
 
             elif user_text.lower().startswith("subtasks "):
                 _, issue_key = user_text.split(" ", 1)
@@ -88,7 +121,7 @@ async def slack_events(req: Request):
                 if details:
                     desc_preview = " ".join(
                         "".join(p.get("text", "") for p in block.get("content", []))
-                        for block in details["description"]
+                        for block in details.get("description", [])
                     )[:200] + "..."
                     msg = (f"{issue_key}: {details['summary']}\n"
                            f"Status: {details['status']}\n"
@@ -98,20 +131,22 @@ async def slack_events(req: Request):
                            f"Description: {desc_preview}")
                     slack_client.chat_postMessage(channel=channel, text=msg)
                 else:
-                    slack_client.chat_postMessage(channel=channel, text=f"Could not fetch details for {issue_key}")
+                    slack_client.chat_postMessage(channel=channel, text=f"❌ Could not fetch details for {issue_key}")
 
-        else:
-            # Non-Jira → Confluence Q&A with typing indicator
-            try:
-                # Send "typing..." indicator
-                slack_client.chat_postMessage(channel=channel, text="_Bot is typing..._")
-                
-                # Async sleep to simulate typing
-                await asyncio.sleep(1)
-                
-                answer = confluence_answer(user_text)
-                slack_client.chat_postMessage(channel=channel, text=answer)
-            except Exception as e:
-                slack_client.chat_postMessage(channel=channel, text=f"Could not fetch Confluence answer: {e}")
+        except Exception as e:
+            slack_client.chat_postMessage(channel=channel, text=f"❌ Error processing Jira command: {e}")
+
+    # -------------------------------
+    # Confluence Q&A fallback
+    # -------------------------------
+    else:
+        try:
+            slack_client.chat_postMessage(channel=channel, text="_Bot is typing..._")
+            await asyncio.sleep(1)
+            answer = confluence_answer(user_text)
+            slack_client.chat_postMessage(channel=channel, text=answer)
+        except Exception as e:
+            slack_client.chat_postMessage(channel=channel, text=f"❌ Could not fetch Confluence answer: {e}")
 
     return {"ok": True}
+
